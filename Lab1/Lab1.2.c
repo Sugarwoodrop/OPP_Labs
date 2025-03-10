@@ -12,7 +12,7 @@ void Norma(double* Vector, double* final_number) {
 	for (int i = 0; i < N; ++i) {
 		sum += Vector[i] * Vector[i] ;
 	}
-	#pragma omp critical	
+	#pragma omp atomic
 	*final_number += sum;
 
 	#pragma omp barrier 
