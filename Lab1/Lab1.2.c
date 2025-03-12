@@ -17,7 +17,7 @@ void Norma(double* Vector, double* final_number) {
 
 	#pragma omp barrier 
 
-	#pragma omp single nowait
+	#pragma omp single
     {
         *final_number = sqrt(*final_number);
     }
