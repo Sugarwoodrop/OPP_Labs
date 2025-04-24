@@ -4,54 +4,40 @@
 #include <math.h>
 #include <time.h>
 
-#define N1 3000 // Количество строк в матрице A и C
-#define N2 3000 // Количество столбцов в A и строк в B
-#define N3 3000 // Количество столбцов в матрицах B и C
+#define N1 1600 
+#define N2 1600 
+#define N3 1600 
 
-double** allocateMatrix(int rows, int cols) {
-    double** matrix = (double**)malloc(rows * sizeof(double*));
+double* allocateMatrix1D(int size) {
+    double* matrix = (double*)malloc(size * sizeof(double));
     if (matrix == NULL) {
         fprintf(stderr, "Ошибка выделения памяти для матрицы\n");
         exit(EXIT_FAILURE);
     }
-    
-    for (int i = 0; i < rows; i++) {
-        matrix[i] = (double*)malloc(cols * sizeof(double));
-        if (matrix[i] == NULL) {
-            exit(EXIT_FAILURE);
-        }
-    }
     return matrix;
 }
 
-void freeMatrix(double** matrix, int rows) {
-    for (int i = 0; i < rows; i++) {
-        free(matrix[i]);
-    }
-    free(matrix);
-}
-
-void initIdentityMatrix(double** matrix, int rows, int cols) {
+void initIdentityMatrix(double* matrix, int rows, int cols) {
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            matrix[i][j] = (i == j) ? 1.0 : 0.0;
+            matrix[i * cols + j] = (i == j) ? 1.0 : 0.0;
         }
     }
 }
 
-void initRandomMatrix(double** matrix, int rows, int cols) {
+void initRandomMatrix(double* matrix, int rows, int cols) {
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            matrix[i][j] = 1.0 + rand() % 10;
+            matrix[i * cols + j] = 1.0 + rand() % 10;
         }
     }
 }
 
-void printMatrix(double** matrix, int rows, int cols, const char* name) {
+void printMatrix(double* matrix, int rows, int cols, const char* name) {
     printf("Матрица %s (%dx%d):\n", name, rows, cols);
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            printf("%6.2f ", matrix[i][j]);
+            printf("%6.2f ", matrix[i * cols + j]);
         }
         printf("\n");
     }
@@ -67,15 +53,19 @@ int main(int argc, char* argv[]) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-
+    
     srand(time(NULL) + rank);
     
     dims[0] = dims[1] = 0;
     MPI_Dims_create(size, 2, dims);
     p1 = dims[0];
     p2 = dims[1];
-      
-    // Создание декартовой топологии
+    
+    if (rank == 0) {
+        printf("Создание решетки процессов %dx%d для матриц размером (%dx%d)x(%dx%d)\n", 
+               p1, p2, N1, N2, N2, N3);
+    }
+    
     periods[0] = periods[1] = 0;
     MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 1, &grid_comm);
     
@@ -97,60 +87,35 @@ int main(int argc, char* argv[]) {
     remain_dims[1] = 0;
     MPI_Cart_sub(grid_comm, remain_dims, &col_comm);
     
-    double** local_A = allocateMatrix(local_n1, N2);
-    double** local_B = allocateMatrix(N2, local_n3);
-    double** local_C = allocateMatrix(local_n1, local_n3);
+    double* local_A = allocateMatrix1D(local_n1 * N2);
+    double* local_B = allocateMatrix1D(N2 * local_n3);
+    double* local_C = allocateMatrix1D(local_n1 * local_n3);
     
-    for (int i = 0; i < local_n1; i++) {
-        for (int j = 0; j < local_n3; j++) {
-            local_C[i][j] = 0.0;
-        }
+    for (int i = 0; i < local_n1 * local_n3; i++) {
+        local_C[i] = 0.0;
     }
     
-    double** A = NULL;
-    double** B = NULL;
-    double** C = NULL;
+    double* A = NULL;
+    double* B = NULL;
+    double* C = NULL;
     
     if (rank == 0) {
-        A = allocateMatrix(N1, N2);
-        B = allocateMatrix(N2, N3);
-        C = allocateMatrix(N1, N3);
+        A = allocateMatrix1D(N1 * N2);
+        B = allocateMatrix1D(N2 * N3);
+        C = allocateMatrix1D(N1 * N3);
         
         initIdentityMatrix(A, N1, N2);
         
         initRandomMatrix(B, N2, N3);
     }
     
-    double t1 = MPI_Wtime();
-    
-    double *send_buf_A = NULL, *send_buf_B = NULL;
-    if (rank == 0) {
-        send_buf_A = (double*)malloc(N1 * N2 * sizeof(double));
-        send_buf_B = (double*)malloc(N2 * N3 * sizeof(double));
-        
-        for (int i = 0; i < N1; i++) {
-            for (int j = 0; j < N2; j++) {
-                send_buf_A[i * N2 + j] = A[i][j];
-            }
-        }
-        
-        for (int i = 0; i < N2; i++) {
-            for (int j = 0; j < N3; j++) {
-                send_buf_B[i * N3 + j] = B[i][j];
-            }
-        }
-    }
-    
-    double *row_buf_A = (double*)malloc(local_n1 * N2 * sizeof(double));
-    double *col_buf_B = (double*)malloc(N2 * local_n3 * sizeof(double));
-
-    
     if (col_coord == 0) {
-        int *sendcounts_A = NULL, *displs_A = NULL;
+        int* sendcounts_A = NULL;
+        int* displs_A = NULL;
         
         if (rank == 0) {
-            sendcounts_A = (int*)calloc(p1, sizeof(int)); // сколько элементов отправить каждому процессу
-            displs_A = (int*)calloc(p1, sizeof(int)); // указывает смещения от начала
+            sendcounts_A = (int*)calloc(p1, sizeof(int));
+            displs_A = (int*)calloc(p1, sizeof(int));
             
             for (int i = 0; i < p1; i++) {
                 int rows_in_block = N1 / p1 + (i < (N1 % p1) ? 1 : 0);
@@ -159,8 +124,8 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        MPI_Scatterv(send_buf_A, sendcounts_A, displs_A, MPI_DOUBLE, 
-                     row_buf_A, local_n1 * N2, MPI_DOUBLE, 
+        MPI_Scatterv(A, sendcounts_A, displs_A, MPI_DOUBLE, 
+                     local_A, local_n1 * N2, MPI_DOUBLE, 
                      0, col_comm);
         
         if (rank == 0) {
@@ -170,148 +135,130 @@ int main(int argc, char* argv[]) {
     }
     
     if (row_coord == 0) {
-        MPI_Datatype column_type;
-        MPI_Type_vector(N2, local_n3, N3, MPI_DOUBLE, &column_type);
-        MPI_Type_commit(&column_type);
-        
-        int *sendcounts_B = NULL, *displs_B = NULL;
+        int* sendcounts_B = NULL;
+        int* displs_B = NULL;
+        double* temp_B = NULL;
         
         if (rank == 0) {
             sendcounts_B = (int*)calloc(p2, sizeof(int));
             displs_B = (int*)calloc(p2, sizeof(int));
+            temp_B = (double*)malloc(N2 * N3 * sizeof(double));
+            
+            for (int i = 0; i < N2; i++) {
+                for (int j = 0; j < N3; j++) {
+                    temp_B[j * N2 + i] = B[i * N3 + j];
+                }
+            }
             
             for (int j = 0; j < p2; j++) {
-                sendcounts_B[j] = 1;
-                displs_B[j] = (j > 0) ? (displs_B[j-1] + (N3 / p2) + (j-1 < (N3 % p2) ? 1 : 0)) : 0;
+                int cols_in_block = N3 / p2 + (j < (N3 % p2) ? 1 : 0);
+                sendcounts_B[j] = cols_in_block * N2;
+                displs_B[j] = (j > 0) ? (displs_B[j-1] + sendcounts_B[j-1]) : 0;
             }
         }
         
-        if (rank == 0) {
-            for (int j = 0; j < p2; j++) {
-                int dest_rank;
-                int dest_coords[2] = {0, j};
-                MPI_Cart_rank(grid_comm, dest_coords, &dest_rank);
-                
-                if (dest_rank == 0) {
-                    for (int i = 0; i < N2; i++) {
-                        for (int k = 0; k < local_n3; k++) {
-                            col_buf_B[i * local_n3 + k] = B[i][k];
-                        }
-                    }
-                } else {
-                    int cols_in_block = N3 / p2 + (j < (N3 % p2) ? 1 : 0);
-                    int col_offset = (N3 / p2) * j + (j < (N3 % p2) ? j : (N3 % p2));
-                    
-                    double* temp_buf = (double*)malloc(N2 * cols_in_block * sizeof(double));
-                    
-                    for (int i = 0; i < N2; i++) {
-                        for (int k = 0; k < cols_in_block; k++) {
-                            temp_buf[i * cols_in_block + k] = B[i][col_offset + k];
-                        }
-                    }
-                    
-                    MPI_Send(temp_buf, N2 * cols_in_block, MPI_DOUBLE, dest_rank, 0, grid_comm);
-                    
-                    free(temp_buf);
-                }
-            }
-        } else if (col_coord != 0) {
-            MPI_Recv(col_buf_B, N2 * local_n3, MPI_DOUBLE, 0, 0, grid_comm, MPI_STATUS_IGNORE);// Прием данных
-        }
+        
+        MPI_Scatterv(temp_B, sendcounts_B, displs_B, MPI_DOUBLE, 
+                     local_B, local_n3 * N2, MPI_DOUBLE, 
+                     0, row_comm);
+        
+        
         
         if (rank == 0) {
             free(sendcounts_B);
             free(displs_B);
+            free(temp_B);
         }
         
-        MPI_Type_free(&column_type);
     }
     
-    MPI_Bcast(row_buf_A, local_n1 * N2, MPI_DOUBLE, 0, row_comm);
+    MPI_Bcast(local_A, local_n1 * N2, MPI_DOUBLE, 0, row_comm);
     
-    MPI_Bcast(col_buf_B, N2 * local_n3, MPI_DOUBLE, 0, col_comm);
+    MPI_Bcast(local_B, N2 * local_n3, MPI_DOUBLE, 0, col_comm);
     
     for (int i = 0; i < local_n1; i++) {
-        for (int j = 0; j < N2; j++) {
-            local_A[i][j] = row_buf_A[i * N2 + j];
+    for (int j = 0; j < local_n3; j++) {
+        double sum = 0.0;
+        for (int k = 0; k < N2; k++) {
+            sum += local_A[i * N2 + k] * local_B[j * N2 + k];
         }
+        local_C[i * local_n3 + j] = sum;
     }
+}
+
+
+  int local_size = local_n1 * local_n3;
+  int* recvcounts = NULL;
+  int* displs = NULL;
+
+  if (rank == 0) {
+    recvcounts = (int*)malloc(size * sizeof(int));
+    displs = (int*)malloc(size * sizeof(int));
     
-    for (int i = 0; i < N2; i++) {
-        for (int j = 0; j < local_n3; j++) {
-            local_B[i][j] = col_buf_B[i * local_n3 + j];
-        }
-    }
-    
-    for (int i = 0; i < local_n1; i++) {
-        for (int j = 0; j < local_n3; j++) {
-            local_C[i][j] = 0.0;
-            for (int k = 0; k < N2; k++) {
-                local_C[i][j] += local_A[i][k] * local_B[k][j];
-            }
-        }
-    }
-    
-    double *recv_buf_C = NULL;
-    if (rank == 0) {
-        recv_buf_C = (double*)malloc(N1 * N3 * sizeof(double));
-    }
-    
-    double *local_C_buf = (double*)malloc(local_n1 * local_n3 * sizeof(double));
-    for (int i = 0; i < local_n1; i++) {
-        for (int j = 0; j < local_n3; j++) {
-            local_C_buf[i * local_n3 + j] = local_C[i][j];
-        }
-    }
-    
-    if (rank == 0) {
-        for (int i = 0; i < local_n1; i++) {
-            for (int j = 0; j < local_n3; j++) {
-                recv_buf_C[i * N3 + j] = local_C[i][j];
-            }
-        }
+    int current_displ = 0;
+    for (int proc = 0; proc < size; proc++) {
+        int proc_coords[2];
+        MPI_Cart_coords(grid_comm, proc, 2, proc_coords);
         
-        for (int proc = 1; proc < size; proc++) {
-            int proc_coords[2];
-            MPI_Cart_coords(grid_comm, proc, 2, proc_coords);
-            
-            int proc_row = proc_coords[0];
-            int proc_col = proc_coords[1];
-            
-            int proc_n1 = N1 / p1 + (proc_row < (N1 % p1) ? 1 : 0);
-            int proc_n3 = N3 / p2 + (proc_col < (N3 % p2) ? 1 : 0);
-            
-            int proc_row_offset = (N1 / p1) * proc_row + (proc_row < (N1 % p1) ? proc_row : (N1 % p1));
-            int proc_col_offset = (N3 / p2) * proc_col + (proc_col < (N3 % p2) ? proc_col : (N3 % p2));
-            
-            double *temp_buf = (double*)malloc(proc_n1 * proc_n3 * sizeof(double));
-            MPI_Recv(temp_buf, proc_n1 * proc_n3, MPI_DOUBLE, proc, 0, grid_comm, MPI_STATUS_IGNORE);
-            
-            for (int i = 0; i < proc_n1; i++) {
-                for (int j = 0; j < proc_n3; j++) {
-                    recv_buf_C[(proc_row_offset + i) * N3 + (proc_col_offset + j)] = temp_buf[i * proc_n3 + j];
-                }
-            }
-            
-            free(temp_buf);
-        }
-    } else {
-        MPI_Send(local_C_buf, local_n1 * local_n3, MPI_DOUBLE, 0, 0, grid_comm);
+        int proc_row = proc_coords[0];
+        int proc_col = proc_coords[1];
+        
+        int proc_n1 = N1 / p1 + (proc_row < (N1 % p1) ? 1 : 0);
+        int proc_n3 = N3 / p2 + (proc_col < (N3 % p2) ? 1 : 0);
+        
+        recvcounts[proc] = proc_n1 * proc_n3;
+        displs[proc] = current_displ;
+        current_displ += recvcounts[proc];
+    }
+  }
+
+  double* local_C_linear = (double*)malloc(local_size * sizeof(double));
+  for (int i = 0; i < local_n1; i++) {
+    for (int j = 0; j < local_n3; j++) {
+        local_C_linear[i * local_n3 + j] = local_C[i * local_n3 + j];
+    }
+  }
+
+  double* gathered_data = NULL;
+  if (rank == 0) {
+    gathered_data = (double*)malloc(N1 * N3 * sizeof(double));
+  }
+
+  MPI_Gatherv(local_C_linear, local_size, MPI_DOUBLE,
+            gathered_data, recvcounts, displs, MPI_DOUBLE,
+            0, MPI_COMM_WORLD);
+
+  if (rank == 0) {
+    for (int i = 0; i < N1 * N3; i++) {
+        C[i] = 0.0;
     }
     
-    if (rank == 0) {
-        for (int i = 0; i < N1; i++) {
-            for (int j = 0; j < N3; j++) {
-                C[i][j] = recv_buf_C[i * N3 + j];
+    int data_index = 0;
+    for (int proc = 0; proc < size; proc++) {
+        int proc_coords[2];
+        MPI_Cart_coords(grid_comm, proc, 2, proc_coords);
+        
+        int proc_row = proc_coords[0];
+        int proc_col = proc_coords[1];
+        
+        int proc_n1 = N1 / p1 + (proc_row < (N1 % p1) ? 1 : 0);
+        int proc_n3 = N3 / p2 + (proc_col < (N3 % p2) ? 1 : 0);
+        int row_start = (N1 / p1) * proc_row + (proc_row < (N1 % p1) ? proc_row : (N1 % p1));
+        int col_start = (N3 / p2) * proc_col + (proc_col < (N3 % p2) ? proc_col : (N3 % p2));
+        
+        for (int i = 0; i < proc_n1; i++) {
+            for (int j = 0; j < proc_n3; j++) {
+                int global_row = row_start + i;
+                int global_col = col_start + j;
+                C[global_row * N3 + global_col] = gathered_data[data_index++];
             }
         }
-        double t2 = MPI_Wtime();
-        printf("%f\n", t2 - t1);
+    }
         
         int equal = 1;
         for (int i = 0; i < N2 && equal; i++) {
           for (int j = 0; j < N3; j++) {
-            if (fabs(C[i][j] - B[i][j]) > 1e-6) {
+            if (fabs(C[i* N2 + j] - B[i * N3 + j]) > 1e-6) {
               equal = 0;
               break;
             }
@@ -323,20 +270,18 @@ int main(int argc, char* argv[]) {
           printf("Матрицы B и C НЕ совпадают\n");
         }
         
-        freeMatrix(A, N1);
-        freeMatrix(B, N2);
-        freeMatrix(C, N1);
-        free(send_buf_A);
-        free(send_buf_B);
-        free(recv_buf_C);
+        free(A);
+        free(B);
+        free(C);
+        free(recvcounts);
+        free(displs);
     }
     
-    freeMatrix(local_A, local_n1);
-    freeMatrix(local_B, N2);
-    freeMatrix(local_C, local_n1);
-    free(row_buf_A);
-    free(col_buf_B);
-    free(local_C_buf);
+  
+    free(local_A);
+    free(local_B);
+    free(local_C);
+    free(local_C_linear);
     
     MPI_Comm_free(&row_comm);
     MPI_Comm_free(&col_comm);
